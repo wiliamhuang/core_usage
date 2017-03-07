@@ -1,8 +1,11 @@
-// g++ core_usage.cpp -lX11
-// Usage: ./a.out 0.2
-// The parameter is the time interval of updating core unitlization data. Without it, 0.3 is used as default. 
+// Compile: g++ -O2 -o core_usage core_usage.cpp -lX11 -lncurses
+// Run:     ./a.out 0.3
+//                  the time interval (in seconds) for info update
+//          The GUI will show up if X11 is available. If not, the 
+//          console version will run. If you want to run the console 
+//          version even you have X11, 
+//          ./a.out 0.3 txt_mode
 
-// This contains the code of a GUI for showing core unitlizations
 // Written by Lei Huang at Texas Advanced Computing Center.
 //
 // A part of code is from, 
@@ -17,6 +20,9 @@
 #include <X11/Xutil.h>
 #include <sys/time.h>
 #include <time.h>
+#include <ctype.h>
+#include <curses.h>
+#include <signal.h>
 
 #define MAX_CORE	(1024)
 #ifndef max(a,b)
@@ -26,24 +32,24 @@
 #ifndef timeradd
 # define timeradd(a, b, result)							\
 	do {													\
-		(result)->tv_sec = (a)->tv_sec + (b)->tv_sec;		\
-		(result)->tv_usec = (a)->tv_usec + (b)->tv_usec;	\
-		if ((result)->tv_usec >= 1000000)					\
+	(result)->tv_sec = (a)->tv_sec + (b)->tv_sec;		\
+	(result)->tv_usec = (a)->tv_usec + (b)->tv_usec;	\
+	if ((result)->tv_usec >= 1000000)					\
 		{												\
-			++(result)->tv_sec;								\
-			(result)->tv_usec -= 1000000;						\
+		++(result)->tv_sec;								\
+		(result)->tv_usec -= 1000000;						\
 		}												\
 	} while (0)
 #endif
 #ifndef timersub
 # define timersub(a, b, result)						\
 	do {													\
-		(result)->tv_sec = (a)->tv_sec - (b)->tv_sec;		\
-		(result)->tv_usec = (a)->tv_usec - (b)->tv_usec;	\
-		if ((result)->tv_usec < 0) {						\
-			--(result)->tv_sec;								\
-			(result)->tv_usec += 1000000;					\
-		}													\
+	(result)->tv_sec = (a)->tv_sec - (b)->tv_sec;		\
+	(result)->tv_usec = (a)->tv_usec - (b)->tv_usec;	\
+	if ((result)->tv_usec < 0) {						\
+	--(result)->tv_sec;								\
+	(result)->tv_usec += 1000000;					\
+	}													\
 	} while (0)
 #endif
 
@@ -56,13 +62,16 @@ Window win;
 int screen;
 GC gc;
 
-int nCore;
+int nCore, nThread_per_Core, nCPU;
 unsigned long long cur_user[MAX_CORE], cur_nice[MAX_CORE], cur_system[MAX_CORE], cur_idle[MAX_CORE], 
 cur_iowait[MAX_CORE], cur_irq[MAX_CORE], cur_softirq[MAX_CORE], cur_steal[MAX_CORE];
 
 unsigned long long old_user[MAX_CORE], old_nice[MAX_CORE], old_system[MAX_CORE], old_idle[MAX_CORE], 
 old_iowait[MAX_CORE], old_irq[MAX_CORE], old_softirq[MAX_CORE], old_steal[MAX_CORE];
 float Core_Usage[MAX_CORE];
+
+int CoreID[MAX_CORE];	// which core this thread is located on. Terminal version. 
+int ThreadID[MAX_CORE];	// store the thread index on the core it sits in. Terminal version. 
 
 int bar_width, bar_height=200, extra=55, x0, y0, win_width, win_height;
 char szHostName[256];
@@ -73,6 +82,11 @@ void Read_Proc_Stat(void);
 void Save_Core_Stat(void);
 void Cal_Core_Usage(void);
 void Setup_bar_width(void);
+
+void Format_Two_Digital(int number, char szBuf[]);
+static void Clean_up(int sig, siginfo_t *siginfo, void *ptr);	// Used by terminal version
+void Extract_Thread_Mapping_Info(void);	// Used by terminal version
+
 
 void Setup_bar_width(void)
 {
@@ -100,14 +114,14 @@ void Cal_Core_Usage(void)
 	for(i=0; i<nCore; i++)	{
 		cur_Idle = cur_idle[i] + cur_iowait[i];
 		cur_NonIdle = cur_user[i] + cur_nice[i] + cur_system[i] + cur_irq[i] + cur_softirq[i] + cur_steal[i];
-
+		
 		old_Idle = old_idle[i] + old_iowait[i];
 		old_NonIdle = old_user[i] + old_nice[i] + old_system[i] + old_irq[i] + old_softirq[i] + old_steal[i];
-
+		
 		Core_Usage[i] = 1.0*(cur_NonIdle - old_NonIdle)/(cur_Idle+cur_NonIdle - old_Idle - old_NonIdle);
-//		printf("Core %3d: %4.3f\n", i, Core_Usage[i]);
+		//		printf("Core %3d: %4.3f\n", i, Core_Usage[i]);
 	}
-
+	
 	Save_Core_Stat();
 }
 
@@ -172,31 +186,132 @@ public:
 xtimer *t;
 float tInterval=0.3;
 
-int main(int argc, char *argv[]) {
-	int Run=1;
-	XEvent ev;
+WINDOW * mainwin;
 
+void Run_Terminal_version(void)
+{
+    int ch, i, j, iMax, nLine, nCol, cpu_idx, thread_idx, Width=32;
+	time_t t;
+	struct tm tm;
+	char szNull[]="                                                                                         ";
+	char szTime[128], szMonth[8], szDay[8], szHour[8], szMin[8], szSec[8];
+	struct sigaction act;
+	
+	Extract_Thread_Mapping_Info();
+	nCPU = nCore/nThread_per_Core;
+	
+    if ( (mainwin = initscr()) == NULL ) {
+		fprintf(stderr, "Error initializing ncurses.\n");
+		exit(EXIT_FAILURE);
+    }
+	
+	start_color();
+    init_pair(1, COLOR_WHITE, COLOR_BLACK);
+    init_pair(2, COLOR_GREEN, COLOR_BLACK);
+	attron(COLOR_PAIR(1));
+	
+	if(nCPU <= 32)	{
+		nLine = nCPU;	nCol = 1;
+	}
+	else if(nCPU <=64)	{
+		nLine = (nCPU+1)/2;		nCol = 2;
+	}
+	else	{
+		nLine = (nCPU+2)/3;		nCol = 3;
+	}
+	
+    noecho();                  /*  Turn off key echoing                 */
+    keypad(mainwin, TRUE);     /*  Enable the keypad for non-char keys  */
+	
+    memset (&act, 0, sizeof(act));
+    act.sa_sigaction = Clean_up;
+    act.sa_flags = SA_SIGINFO;
+	
+    if (sigaction(SIGINT, &act, 0)) {
+        perror("Error: sigaction");
+        exit(1);
+    }
+	
+	usleep(50000);
+	
+    while (1) {
+		iMax = nLine + 4;
+		for(i=1; i<=iMax;i++)	{
+			mvprintw(i, 0, "%s", szNull);	// empty everything. Useful when resizing the terminal
+		}
+		
+		Cal_Core_Usage();
+		
+		t = time(NULL);
+		tm = *localtime(&t);
+		Format_Two_Digital(tm.tm_mon + 1, szMonth);
+		Format_Two_Digital(tm.tm_mday, szDay);
+		Format_Two_Digital(tm.tm_hour, szHour);
+		Format_Two_Digital(tm.tm_min, szMin);
+		Format_Two_Digital(tm.tm_sec, szSec);
+		
+		sprintf(szTime, "Now: %s/%s/%d %s:%s:%s on node %s", szMonth, szDay, tm.tm_year + 1900, szHour, szMin, szSec, szHostName);
+		mvprintw(0, 2, "%s", szTime);
+		
+		for(i=0; i<nCol; i++)	{	// loop over column
+			for(j=0; j<nThread_per_Core; j++)	{
+				mvprintw(2, 10 + Width*i + 5*j, "   T%d", j);
+			}
+		}
+		
+		for(i=0; i<nCPU; i++)	{
+			mvprintw(3+(i%nLine), 1+Width*(i/nLine), "CORE %3d: ", i);
+		}
+		
+		for(i=0; i<nCore; i++)	{
+			cpu_idx = CoreID[i];
+			thread_idx = ThreadID[i];
+			if(Core_Usage[i] > 0.02)	attron(COLOR_PAIR(2));	// Use special color for non-idle core.
+			mvprintw(3+(cpu_idx%nLine), 12 + 5*thread_idx + Width*(cpu_idx/nLine), "%3.2f", Core_Usage[i]);
+			if(Core_Usage[i] > 0.02)	attron(COLOR_PAIR(1));	// Restore the default color.
+		}
+		mvprintw(nLine+5, 2, "Use Ctrl+c to quit.");
+		mvprintw(0, 0, "");
+		refresh();
+		usleep((int)(1000000*tInterval));
+    }
+	
+    return;
+}
+
+int main(int argc, char *argv[]) {
+	int Run=1, GUI_On=1;
+	XEvent ev;
+	
 	if(argc >= 2)	{
 		tInterval = atof(argv[1]);
+		if(argc == 3)	{	// Run the terminal version
+			GUI_On = 0;
+		}
 	}
 	
 	Init_Core_Stat();
 	Read_Proc_Stat();
 	Setup_bar_width();
-
+	
 	gethostname(szHostName, 255);
-
+	
 	dis = XOpenDisplay(NULL);
-	if(dis == NULL)	{
-		printf("Fail to open DISPALY. Did you set up X11 forwarding?\n");
-		exit(1);
+	if( (dis == NULL) || (GUI_On == 0) )	{
+		printf("Fail to open DISPALY. Did you set up X11 forwarding?\nThe terminal version will run.\n");
+		sleep(1);
+		Run_Terminal_version();
+		return 0;
 	}
+	
+	//	printf("display = %x\n", dis);
 	screen = DefaultScreen(dis);
+	//	printf("screen = %x\n", screen);
 	win_width = bar_width*(nCore-1)+2*extra;
 	win_height = bar_height+2*extra;
 	win = XCreateSimpleWindow(dis, RootWindow(dis, 0), 1, 1, bar_width*(nCore-1)+2*extra, bar_height+2*extra, \
         0, WhitePixel(dis, 0), WhitePixel(dis, 0));
-
+	
     // You don't need all of these. Make the mask as you normally would.
 	XSelectInput(dis, win, 
 		ExposureMask | KeyPressMask | KeyReleaseMask | PointerMotionMask |
@@ -205,7 +320,7 @@ int main(int argc, char *argv[]) {
 	
 	XMapWindow(dis, win);
 	gc = DefaultGC(dis, screen);
-
+	
 	Atom WM_DELETE_WINDOW = XInternAtom(dis, "WM_DELETE_WINDOW", False); 
 	XSetWMProtocols(dis, win, &WM_DELETE_WINDOW, 1);
 	XFlush(dis);
@@ -242,7 +357,7 @@ void Format_Two_Digital(int number, char szBuf[])
 
 void DrawLines(void)
 {
-	char szCoreIdx[5][64]={"1", "xx", "xx", "xx", "272"};
+	char szCoreIdx[5][64]={"0", "xx", "xx", "xx", "271"};
 	const char *szUsage[]={"0%", "50%", "100%"};
 	const char *szAxis[]={"Core Id", "Utilization"};
 	char szMonth[8], szDay[8], szHour[8], szMin[8], szSec[8];
@@ -252,52 +367,52 @@ void DrawLines(void)
 	struct tm tm = *localtime(&t);
 	char szTime[256];
 	int nBufLen;
-
+	
 	line_list[0].x1 = extra;					line_list[0].y1 = bar_height+extra;	
 	line_list[0].x2 = extra+bar_width*nCore;	line_list[0].y2 = bar_height+extra;	
-
+	
 	line_list[1].x1 = extra;					line_list[1].y1 = bar_height+extra;	
 	line_list[1].x2 = extra;					line_list[1].y2 = extra;
-
+	
 	line_list[2].x1 = extra;					line_list[2].y1 = extra;	
 	line_list[2].x2 = extra+bar_width*nCore;	line_list[2].y2 = extra;	
-
+	
 	line_list[3].x1 = extra;					line_list[3].y1 = extra+bar_height*0.5;	
 	line_list[3].x2 = extra+bar_width*nCore;	line_list[3].y2 = extra+bar_height*0.5;	
-
+	
 	XSetForeground(dis, gc, 0x0);
-
+	
 	XDrawSegments(dis, win, gc, line_list, 4);
-
-	nMid = (int)((nCore+1)/2);
-	nMid_L = (int)((1+nMid)/2);
-	nMid_R = (int)((nCore+nMid)/2);
+	
+	nMid = (int)((nCore-1)/2);
+	nMid_L = (int)((nMid)/2);
+	nMid_R = (int)((nCore-1+nMid)/2);
 	sprintf(szCoreIdx[1], "%d", nMid_L);
 	sprintf(szCoreIdx[2], "%d", nMid);
 	sprintf(szCoreIdx[3], "%d", nMid_R);
-	sprintf(szCoreIdx[4], "%d", nCore);
+	sprintf(szCoreIdx[4], "%d", nCore-1);
 	XDrawString(dis, win, gc, extra, extra+bar_height+14, szCoreIdx[0], strlen(szCoreIdx[0]));
-
+	
 	if(nCore>4) XDrawString(dis, win, gc, extra+(int)((nMid_L-1+0.5)*bar_width), extra+bar_height+14, szCoreIdx[1], strlen(szCoreIdx[1]));
 	if(nCore>2) XDrawString(dis, win, gc, extra+(int)((nMid-1+0.5)*bar_width), extra+bar_height+14, szCoreIdx[2], strlen(szCoreIdx[2]));
 	if(nCore>4) XDrawString(dis, win, gc, extra+(int)((nMid_R-1+0.5)*bar_width), extra+bar_height+14, szCoreIdx[3], strlen(szCoreIdx[3]));
 	
 	if(nCore>1) XDrawString(dis, win, gc, extra+(int)((nCore-0.5)*bar_width), extra+bar_height+14, szCoreIdx[4], strlen(szCoreIdx[4]));
 	
-
+	
 	XDrawString(dis, win, gc, extra-13, extra+bar_height+4, szUsage[0], strlen(szUsage[0]));
 	XDrawString(dis, win, gc, extra-19, extra+bar_height*0.5+4, szUsage[1], strlen(szUsage[1]));
 	XDrawString(dis, win, gc, extra-25, extra+6, szUsage[2], strlen(szUsage[2]));
-
+	
 	XDrawString(dis, win, gc, extra+(int)((nCore-0.5)*bar_width-20), extra+bar_height+32, szAxis[0], strlen(szAxis[0]));	// X-Axis info
 	XDrawString(dis, win, gc, extra-30, extra-15, szAxis[1], strlen(szAxis[1]));	// Y-Axis info
-
+	
 	Format_Two_Digital(tm.tm_mon + 1, szMonth);
 	Format_Two_Digital(tm.tm_mday, szDay);
 	Format_Two_Digital(tm.tm_hour, szHour);
 	Format_Two_Digital(tm.tm_min, szMin);
 	Format_Two_Digital(tm.tm_sec, szSec);
-
+	
 	sprintf(szTime, "Now: %s/%s/%d %s:%s:%s on node %s", szMonth, szDay, tm.tm_year + 1900, szHour, szMin, szSec, szHostName);
 	nBufLen = strlen(szTime);
 	XDrawString(dis, win, gc, max((int)(0.2*win_width), 70), extra-30, szTime, strlen(szTime));	// current time stamp
@@ -306,14 +421,14 @@ void DrawLines(void)
 void timerFired()
 {
 	int i, height;
-
+	
 	Cal_Core_Usage();
-
+	
 	XSetForeground(dis, gc, 0xFFFFFF);
 	XFillRectangle(dis, win, gc, 0, 0, win_width, win_height);
-
+	
 	XSetForeground(dis, gc, 0xFF);
-
+	
 	for(i=0; i<nCore; i++)	{
 		height = (int)(bar_height * Core_Usage[i]);
 		XFillRectangle(dis, win, gc, extra+i*bar_width, extra+(bar_height-height), bar_width, height);
@@ -324,9 +439,9 @@ void timerFired()
 void Init_Core_Stat()
 {
 	int i;
-
+	
 	nCore = 0;
-
+	
 	memset(cur_user, 0, sizeof(unsigned long long)*MAX_CORE);
 	memset(cur_nice, 0, sizeof(unsigned long long)*MAX_CORE);
 	memset(cur_system, 0, sizeof(unsigned long long)*MAX_CORE);
@@ -335,7 +450,7 @@ void Init_Core_Stat()
 	memset(cur_irq, 0, sizeof(unsigned long long)*MAX_CORE);
 	memset(cur_softirq, 0, sizeof(unsigned long long)*MAX_CORE);
 	memset(cur_steal, 0, sizeof(unsigned long long)*MAX_CORE);
-
+	
 	memset(old_user, 0, sizeof(unsigned long long)*MAX_CORE);
 	memset(old_nice, 0, sizeof(unsigned long long)*MAX_CORE);
 	memset(old_system, 0, sizeof(unsigned long long)*MAX_CORE);
@@ -349,7 +464,7 @@ void Init_Core_Stat()
 void Save_Core_Stat(void)
 {
 	int i;
-
+	
 	for(i=0; i<nCore; i++)	{
 		old_user[i] = cur_user[i];
 		old_nice[i] = cur_nice[i];
@@ -367,13 +482,13 @@ void Read_Proc_Stat(void)
 	FILE *fIn;
 	char szLine[1024], szCoreIdx[256], *ReadLine;
 	int i, ReadItem;
-
+	
 	fIn = fopen("/proc/stat", "r");
 	if(fIn == NULL)	{
 		printf("Fail to open file: /proc/stat\nQuit\n");
 		exit(1);
 	}
-
+	
 	fgets(szLine, 1024, fIn);
 	
 	if(nCore == 0)	{
@@ -417,5 +532,65 @@ void Read_Proc_Stat(void)
 		}
 	}
 	fclose(fIn);
+}
+
+
+void Extract_Thread_Mapping_Info(void)
+{
+	FILE *fIn;
+	char szLine[1024], *ReadLine;
+	int i, nCoreRead=0, ReadItem, CoreCount;
+	int ThreadCount[MAX_CORE], RealCoreID[MAX_CORE];
+	
+	memset(ThreadCount, 0, sizeof(int)*MAX_CORE);
+	
+	fIn = fopen("/proc/cpuinfo", "r");
+	if(fIn == NULL)	{
+		printf("Fail to open file: cpuinfo.\nQuit\n");
+		exit(1);
+	}
+	
+	while(1)	{
+		ReadLine = fgets(szLine, 1024, fIn);
+		if(ReadLine == NULL)	{
+			break;
+		}
+		if(feof(fIn))	break;
+		if(strncmp(szLine, "core id	", 8)==0)	{
+			ReadItem = sscanf(szLine+11, "%d", &(CoreID[nCoreRead]));
+			if(ReadItem == 1)	{
+				ThreadID[nCoreRead] = ThreadCount[CoreID[nCoreRead]];
+				ThreadCount[CoreID[nCoreRead]]++;
+				nCoreRead++;
+			}
+			else	{
+				printf("Error to read the core id: %s\n", szLine);
+			}
+		}
+	}
+	fclose(fIn);
+	
+	CoreCount = 0;
+	for(i=0; i<MAX_CORE; i++)	{	// Assume every core has the same number of threads.
+		if(ThreadCount[i] > 0)	{
+			RealCoreID[i] = CoreCount;
+			CoreCount++;
+		}
+	}
+	nThread_per_Core = ThreadCount[CoreID[0]];	// Assume every core has the same number of threads.
+	for(i=0; i<nCoreRead; i++)	{
+		CoreID[i] = RealCoreID[CoreID[i]];
+	}
+	return;
+}
+
+static void Clean_up(int sig, siginfo_t *siginfo, void *ptr)
+{
+	//	usleep(1500000);
+    delwin(mainwin);
+    endwin();
+    refresh();
+	
+	exit(0);
 }
 
