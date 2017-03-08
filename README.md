@@ -11,5 +11,8 @@ X11 environment is needed to run.
 The GUI will show up if X11 is available. If not, the console version will run. If you want to run the console version even you have X11, 
        ./a.out 0.3 txt_mode
 
+Screen snapshot of GUI
 ![Alt text](core_usage_knl.jpg?raw=true "Screen snapshot of GUI")
+
+Screen snapshot of the terminal version
 ![Alt text](core_usage_knl_terminal_color.jpg?raw=true "Screen snapshot of terminal version")
