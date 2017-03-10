@@ -298,7 +298,7 @@ int main(int argc, char *argv[]) {
 	
 	dis = XOpenDisplay(NULL);
 	if( (dis == NULL) || (GUI_On == 0) )	{
-		printf("Fail to open DISPALY. Did you set up X11 forwarding?\nThe terminal version will run.\n");
+		if(dis == NULL) printf("Fail to open DISPALY. Did you set up X11 forwarding?\nThe terminal version will run.\n");
 		sleep(1);
 		Run_Terminal_version();
 		return 0;
