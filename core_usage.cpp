@@ -25,6 +25,7 @@
 #include <signal.h>
 
 #define MAX_CORE	(1024)
+#define MAX_SOCKET	(4)
 #ifndef max(a,b)
 #define max(a,b)	(((a)>(b))?(a):(b))
 #endif
@@ -70,8 +71,11 @@ unsigned long long old_user[MAX_CORE], old_nice[MAX_CORE], old_system[MAX_CORE],
 old_iowait[MAX_CORE], old_irq[MAX_CORE], old_softirq[MAX_CORE], old_steal[MAX_CORE];
 float Core_Usage[MAX_CORE];
 
+int nSocket=0, nCore_Socket=0;
+int SocketID[MAX_CORE];
 int CoreID[MAX_CORE];	// which core this thread is located on. Terminal version. 
 int ThreadID[MAX_CORE];	// store the thread index on the core it sits in. Terminal version. 
+
 
 int bar_width, bar_height=200, extra=55, x0, y0, win_width, win_height;
 char szHostName[256];
@@ -264,7 +268,8 @@ void Run_Terminal_version(void)
 		}
 		
 		for(i=0; i<nCore; i++)	{
-			cpu_idx = CoreID[i];
+//			cpu_idx = CoreID[i];
+			cpu_idx = CoreID[i] + SocketID[i]*nCore_Socket;
 			thread_idx = ThreadID[i];
 			if(Core_Usage[i] > 0.02)	attron(COLOR_PAIR(2));	// Use special color for non-idle core.
 			mvprintw(3+(cpu_idx%nLine), 12 + 5*thread_idx + Width*(cpu_idx/nLine), "%3.2f", Core_Usage[i]);
@@ -287,6 +292,7 @@ int main(int argc, char *argv[]) {
 		tInterval = atof(argv[1]);
 		if(argc == 3)	{	// Run the terminal version
 			GUI_On = 0;
+      printf("To run the console version after one second.\n");
 		}
 	}
 	
@@ -539,10 +545,12 @@ void Extract_Thread_Mapping_Info(void)
 {
 	FILE *fIn;
 	char szLine[1024], *ReadLine;
-	int i, nCoreRead=0, ReadItem, CoreCount;
-	int ThreadCount[MAX_CORE], RealCoreID[MAX_CORE];
+	int i, j, nCoreRead=0, ReadItem, CoreCount;
+	int ThreadCount[MAX_SOCKET][MAX_CORE], RealCoreID[MAX_SOCKET][MAX_CORE];
+	int nThread_Socket=0;
+	int MaxSocket=-1;
 	
-	memset(ThreadCount, 0, sizeof(int)*MAX_CORE);
+	memset(ThreadCount, 0, sizeof(int)*MAX_CORE*MAX_SOCKET);
 	
 	fIn = fopen("/proc/cpuinfo", "r");
 	if(fIn == NULL)	{
@@ -556,30 +564,57 @@ void Extract_Thread_Mapping_Info(void)
 			break;
 		}
 		if(feof(fIn))	break;
-		if(strncmp(szLine, "core id	", 8)==0)	{
-			ReadItem = sscanf(szLine+11, "%d", &(CoreID[nCoreRead]));
+		if(strncmp(szLine, "physical id", 11)==0)	{
+			ReadItem = sscanf(szLine+14, "%d", &(SocketID[nCoreRead]));
+			if(ReadItem != 1)	{
+				printf("Error to read the physical id: %s\n", szLine);
+			}
+			else	{
+				if(SocketID[nCoreRead] > MaxSocket)	{
+					MaxSocket = SocketID[nCoreRead];
+				}
+			}
+		}
+		else if(strncmp(szLine, "siblings", 8)==0)	{
+			ReadItem = sscanf(szLine+11, "%d", &nThread_Socket);
+			if(ReadItem != 1)	{
+				printf("Error to read siblings: %s\n", szLine);
+			}
+		}
+		else if(strncmp(szLine, "core id", 7)==0)	{
+			ReadItem = sscanf(szLine+10, "%d", &(CoreID[nCoreRead]));
 			if(ReadItem == 1)	{
-				ThreadID[nCoreRead] = ThreadCount[CoreID[nCoreRead]];
-				ThreadCount[CoreID[nCoreRead]]++;
+				ThreadID[nCoreRead] = ThreadCount[SocketID[nCoreRead]][CoreID[nCoreRead]];
+				ThreadCount[SocketID[nCoreRead]][CoreID[nCoreRead]]++;
 				nCoreRead++;
 			}
 			else	{
 				printf("Error to read the core id: %s\n", szLine);
 			}
 		}
-	}
-	fclose(fIn);
-	
-	CoreCount = 0;
-	for(i=0; i<MAX_CORE; i++)	{	// Assume every core has the same number of threads.
-		if(ThreadCount[i] > 0)	{
-			RealCoreID[i] = CoreCount;
-			CoreCount++;
+		else if(strncmp(szLine, "cpu cores", 9)==0)	{
+			ReadItem = sscanf(szLine+12, "%d", &nCore_Socket);
+			if(ReadItem != 1)	{
+				printf("Error to read siblings: %s\n", szLine);
+			}
 		}
 	}
-	nThread_per_Core = ThreadCount[CoreID[0]];	// Assume every core has the same number of threads.
+	fclose(fIn);
+
+	nSocket = MaxSocket + 1; 
+	
+	for(j=0; j<nSocket; j++)	{
+		CoreCount = 0;
+		for(i=0; i<MAX_CORE; i++)	{	// Assume every core has the same number of threads.
+			if(ThreadCount[j][i] > 0)	{
+				RealCoreID[j][i] = CoreCount;
+				CoreCount++;
+			}
+		}
+	}
+	nThread_per_Core = nThread_Socket / nCore_Socket;
 	for(i=0; i<nCoreRead; i++)	{
-		CoreID[i] = RealCoreID[CoreID[i]];
+		CoreID[i] = RealCoreID[SocketID[i]][CoreID[i]];
 	}
 	return;
 }
