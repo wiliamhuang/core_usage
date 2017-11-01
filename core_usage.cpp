@@ -76,7 +76,6 @@ int SocketID[MAX_CORE];
 int CoreID[MAX_CORE];	// which core this thread is located on. Terminal version. 
 int ThreadID[MAX_CORE];	// store the thread index on the core it sits in. Terminal version. 
 
-
 int bar_width, bar_height=200, extra=55, x0, y0, win_width, win_height;
 char szHostName[256];
 
@@ -90,7 +89,7 @@ void Setup_bar_width(void);
 void Format_Two_Digital(int number, char szBuf[]);
 static void Clean_up(int sig, siginfo_t *siginfo, void *ptr);	// Used by terminal version
 void Extract_Thread_Mapping_Info(void);	// Used by terminal version
-
+int Get_Logic_Core_ID(int Phys_Cores_on_Socket[], int Phys_Core_ID, int& Thread);
 
 void Setup_bar_width(void)
 {
@@ -264,7 +263,15 @@ void Run_Terminal_version(void)
 		}
 		
 		for(i=0; i<nCPU; i++)	{
-			mvprintw(3+(i%nLine), 1+Width*(i/nLine), "CORE %3d: ", i);
+			if(i % nCore_Socket == 0)	{
+				attron(A_BOLD);
+//				attron(A_UNDERLINE);
+				mvprintw(3+(i%nLine), 1+Width*(i/nLine), "CORE %3d: ", i);
+//				attroff(A_UNDERLINE);
+				attroff(A_BOLD);
+			}
+			else
+				mvprintw(3+(i%nLine), 1+Width*(i/nLine), "Core %3d: ", i);
 		}
 		
 		for(i=0; i<nCore; i++)	{
@@ -545,12 +552,19 @@ void Extract_Thread_Mapping_Info(void)
 {
 	FILE *fIn;
 	char szLine[1024], *ReadLine;
-	int i, j, nCoreRead=0, ReadItem, CoreCount;
-	int ThreadCount[MAX_SOCKET][MAX_CORE], RealCoreID[MAX_SOCKET][MAX_CORE];
+	int i, j, nCoreRead=0, ReadItem;
+//	int ThreadCount[MAX_SOCKET][MAX_CORE], PhysCoreID[MAX_SOCKET][MAX_CORE];
+	int PhysCoreID[MAX_SOCKET][MAX_CORE];
 	int nThread_Socket=0;
 	int MaxSocket=-1;
+	int Thread, Logic_Core, PhysCore;
 	
-	memset(ThreadCount, 0, sizeof(int)*MAX_CORE*MAX_SOCKET);
+//	memset(ThreadCount, 0, sizeof(int)*MAX_CORE*MAX_SOCKET);
+	for(j=0; j<MAX_SOCKET; j++)	{
+		for(i=0; i<MAX_CORE; i++)	{
+			PhysCoreID[j][i] = -1;
+		}
+	}
 	
 	fIn = fopen("/proc/cpuinfo", "r");
 	if(fIn == NULL)	{
@@ -582,10 +596,11 @@ void Extract_Thread_Mapping_Info(void)
 			}
 		}
 		else if(strncmp(szLine, "core id", 7)==0)	{
-			ReadItem = sscanf(szLine+10, "%d", &(CoreID[nCoreRead]));
+			ReadItem = sscanf(szLine+10, "%d", &PhysCore);
 			if(ReadItem == 1)	{
-				ThreadID[nCoreRead] = ThreadCount[SocketID[nCoreRead]][CoreID[nCoreRead]];
-				ThreadCount[SocketID[nCoreRead]][CoreID[nCoreRead]]++;
+				Logic_Core = Get_Logic_Core_ID(PhysCoreID[SocketID[nCoreRead]], PhysCore, Thread);	// query logic core and thread info. Or insert new core info
+				ThreadID[nCoreRead] = Thread;
+				CoreID[nCoreRead] = Logic_Core;
 				nCoreRead++;
 			}
 			else	{
@@ -602,20 +617,8 @@ void Extract_Thread_Mapping_Info(void)
 	fclose(fIn);
 
 	nSocket = MaxSocket + 1; 
-	
-	for(j=0; j<nSocket; j++)	{
-		CoreCount = 0;
-		for(i=0; i<MAX_CORE; i++)	{	// Assume every core has the same number of threads.
-			if(ThreadCount[j][i] > 0)	{
-				RealCoreID[j][i] = CoreCount;
-				CoreCount++;
-			}
-		}
-	}
 	nThread_per_Core = nThread_Socket / nCore_Socket;
-	for(i=0; i<nCoreRead; i++)	{
-		CoreID[i] = RealCoreID[SocketID[i]][CoreID[i]];
-	}
+
 	return;
 }
 
@@ -627,5 +630,32 @@ static void Clean_up(int sig, siginfo_t *siginfo, void *ptr)
     refresh();
 	
 	exit(0);
+}
+
+int Get_Logic_Core_ID(int Phys_Cores_on_Socket[], int Phys_Core_ID, int& Thread)
+{
+	int i=0, Logic_ID=-1;
+
+	Thread=-1;
+
+	while(Phys_Cores_on_Socket[i] != (-1) )	{
+		if(Phys_Cores_on_Socket[i] == Phys_Core_ID)	{
+			Thread++;
+			if( Logic_ID == (-1) )	{	// set logic core id
+				Logic_ID = i;
+			}
+		}
+		i++;
+		if(i>=MAX_CORE)	{
+			printf("i>=MAX_CORE in Get_Logic_Core_ID(). Must be something wrong.\n");
+			break;
+		}
+	}
+	
+	if( Thread == (-1) )	Logic_ID = i;	// the count of logic cores
+	Phys_Cores_on_Socket[i] = Phys_Core_ID;	// insert the new physical core id
+	Thread++;	// the first thread
+
+	return Logic_ID;
 }
 
